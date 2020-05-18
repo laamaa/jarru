@@ -1,7 +1,9 @@
+#define CV_OUT_PIN A12
+
 uint8_t state;
 unsigned long trigger_start_time_ms = 0;
-unsigned int hold_time_ms = 2000;
-unsigned int release_time_ms = 2000;
+unsigned int hold_time_ms = 200;
+unsigned int release_time_ms = 200;
 double ducking_amount = 4095.0;
 
 void updateCv()
@@ -11,7 +13,7 @@ void updateCv()
   //trigger new envelope
   if (state == 1 && trigger_start_time_ms == 0)
   {
-    analogWrite(A14, int(4095.0 - ducking_amount));
+    analogWrite(CV_OUT_PIN, int(4095.0 - ducking_amount));
     trigger_start_time_ms = millis();
   }
 
@@ -27,13 +29,13 @@ void updateCv()
     value = 4095.0 - ducking_amount + ((current_time_ms - trigger_start_time_ms - hold_time_ms) * step_ms);
     if (value > 4095.0)
       value = 4095.0;
-    analogWrite(A14, int(value));
+    analogWrite(CV_OUT_PIN, int(value));
   }
 
   //if we're done, let's just chill
   if (state == 2 && (current_time_ms - trigger_start_time_ms - hold_time_ms) > release_time_ms)
   {
-    analogWrite(A14, 4095);
+    analogWrite(CV_OUT_PIN, 4095);
     state = 3;
   }
 }
@@ -42,7 +44,7 @@ void setup()
 {
   analogWriteResolution(12);
   usbMIDI.setHandleNoteOn(OnNoteOn);
-  analogWrite(A14,4095);
+  analogWrite(CV_OUT_PIN,4095);
 }
 
 
