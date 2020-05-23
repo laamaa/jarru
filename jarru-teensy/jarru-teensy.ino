@@ -1,11 +1,16 @@
+#include <MIDI.h>
+
 /* Configure output/input pins here */
 #define PIN_CV_OUT A12
-#define PIN_LED_ENABLE A9
-#define PIN_LED_TAPTEMPO A8
+#define PIN_LED_ENABLE A5
+#define PIN_LED_TAPTEMPO 19
 #define PIN_SW_ENABLE 11
 #define PIN_SW_TAPTEMPO 12
-#define PIN_POT_DEPTH A7
+#define PIN_POT_DEPTH 21
 #define PIN_POT_TIME A6
+
+/* Whether to enable debugging calls */
+#define DEBUG 1
 
 /* Maximum allowed time between tap tempo presses */
 #define MAX_TAP_TIME 5000
@@ -54,7 +59,7 @@ bool sw_taptempo_down = false;
 /* CV envelope processing */
 void update_cv()
 {
-  if (state == 0) return;
+  if (state == ENV_DONE) return;
   
   unsigned long current_time_ms = millis();
 
@@ -98,6 +103,9 @@ void read_controls()
   /* Enable FX switch */
   if (digitalRead(PIN_SW_ENABLE)) {
     if (sw_enable_down == false) {
+      #if DEBUG > 0
+        Serial.println("Enable down");
+      #endif
       sw_enable_down = true;
       enabled = !enabled;
     } 
@@ -110,13 +118,23 @@ void read_controls()
    *  otherwise just calculate the time */
   if (digitalRead(PIN_SW_TAPTEMPO)) {
     if (sw_taptempo_down == false) {
+      #if DEBUG > 0
+        Serial.println("Tap tempo down");
+      #endif
       tap_press_time = millis();
       sw_taptempo_down = true;
-      if (tap_start_time == 0 || (millis() - tap_start_time > MAX_TAP_TIME)) {
+      if (tap_start_time == 0 || ((millis() - tap_start_time) > MAX_TAP_TIME)) {
         tap_start_time = millis();
+        trigger_start_time_ms = 0;
+        state = ENV_START;
       } else {
-        tap_interval = millis() - tap_start_time;
-        tap_start_time = 0;
+        if (millis() - tap_start_time > 200) {
+          tap_interval = millis() - tap_start_time;
+          tap_start_time = 0;
+          #if DEBUG > 0
+            Serial.printf("Interval: %d\n", tap_interval);
+          #endif
+        }
       }
     } else {
       /* If tap tempo button was already pressed down, check if we should disable the feature */
@@ -132,13 +150,22 @@ void read_controls()
 
   /* Depth potentiometer */
   val = analogRead(PIN_POT_DEPTH) * 4;
-  if (val >! ducking_amount + 80 && val <! ducking_amount - 80) //filter out possible random glitching values
+  if (val >! ducking_amount + 80 || val <! ducking_amount - 80) {
+    //filter out possible random glitching values
     ducking_amount = val;
+    #if DEBUG > 0
+    Serial.printf("Depth: %d\n",val);
+    #endif
+  }
+    
   
   /* Time potentiometer */
   val = analogRead(PIN_POT_TIME) * 2;
-  if (val >! release_time_ms + 40 && val <! release_time_ms - 40) {
+  if (val >! release_time_ms + 40 || val <! release_time_ms - 40) {
     release_time_ms = val;
+    #if DEBUG > 0
+    Serial.printf("Time: %d\n",val);
+    #endif
     /* TODO: Adjust hold time also in accordion with release time */
   }
 }
@@ -156,6 +183,9 @@ void process_tap_tempo()
     tap_timer = 0;
     leds[LED_TAPTEMPO].state = LED_STATE_START;
     if (enabled == true) {
+      #if DEBUG > 0
+        Serial.println("Tap tempo trigger");
+      #endif
       trigger_start_time_ms = 0;
       state = ENV_START;
     }
@@ -203,6 +233,14 @@ void setup()
   pinMode(PIN_POT_TIME,INPUT);
   release_time_ms = analogRead(PIN_POT_TIME) * 2;
   ducking_amount = analogRead(PIN_POT_DEPTH) * 4;
+  #if DEBUG > 0
+    Serial.begin(9600);
+    delay(1000);
+    Serial.println("Meizzel Machine - Start");
+    Serial.printf("Initial Time: %d\n",release_time_ms);
+    Serial.printf("Initial amount: %d\n",ducking_amount);    
+  #endif
+
 }
 
 
