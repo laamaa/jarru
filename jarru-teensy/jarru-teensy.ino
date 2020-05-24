@@ -2,7 +2,7 @@
 
 /* Configure output/input pins here */
 #define PIN_CV_OUT A12
-#define PIN_LED_ENABLE A5
+#define PIN_LED_ENABLE 18
 #define PIN_LED_TAPTEMPO 19
 #define PIN_SW_ENABLE 11
 #define PIN_SW_TAPTEMPO 12
@@ -99,18 +99,28 @@ void read_controls()
   uint16_t val;
   static unsigned long tap_start_time = 0;
   static unsigned long tap_press_time = 0;
+  static unsigned long tmr_sw_enable_debounce = 0;
   
   /* Enable FX switch */
   if (digitalRead(PIN_SW_ENABLE)) {
     if (sw_enable_down == false) {
-      #if DEBUG > 0
-        Serial.println("Enable down");
-      #endif
-      sw_enable_down = true;
-      enabled = !enabled;
+      if (tmr_sw_enable_debounce == 0 || millis() - tmr_sw_enable_debounce > 200) {
+        #if DEBUG > 0
+          Serial.println("Enable down");
+        #endif
+        sw_enable_down = true;
+        enabled = !enabled;
+        if (!enabled) {
+          analogWrite(PIN_CV_OUT,4095);
+          analogWrite(PIN_LED_ENABLE,0);
+        } else
+          analogWrite(PIN_LED_ENABLE,255);
+        tmr_sw_enable_debounce = millis();
+      }
     } 
   } else {
     sw_enable_down = false;
+    tmr_sw_enable_debounce = 0;
   }
 
   /*  Tap Tempo Switch
@@ -160,9 +170,10 @@ void read_controls()
     
   
   /* Time potentiometer */
-  val = analogRead(PIN_POT_TIME) * 2;
-  if (val >! release_time_ms + 40 || val <! release_time_ms - 40) {
-    release_time_ms = val;
+  val = analogRead(PIN_POT_TIME);
+  if (val >! release_time_ms + 20 || val <! release_time_ms - 20) {
+    hold_time_ms = val;
+    release_time_ms = val * 2;
     #if DEBUG > 0
     Serial.printf("Time: %d\n",val);
     #endif
@@ -209,15 +220,6 @@ void process_leds()
     case LED_STATE_OFF:
       break;
   }
-
-  if (enabled == true && leds[LED_ENABLE].state != LED_STATE_ON) {
-    analogWrite(PIN_LED_ENABLE, 255);
-    leds[LED_ENABLE].state = LED_STATE_ON;
-  }
-    
-  else if (enabled == false && leds[LED_ENABLE].state != LED_STATE_OFF)
-    analogWrite(PIN_LED_ENABLE,0);
-    leds[LED_ENABLE].state = LED_STATE_OFF;
 }
 
 void setup()
@@ -231,14 +233,19 @@ void setup()
   pinMode(PIN_SW_TAPTEMPO,INPUT);
   pinMode(PIN_POT_DEPTH,INPUT);
   pinMode(PIN_POT_TIME,INPUT);
-  release_time_ms = analogRead(PIN_POT_TIME) * 2;
+  hold_time_ms = analogRead(PIN_POT_TIME);
+  release_time_ms = hold_time_ms * 2;
   ducking_amount = analogRead(PIN_POT_DEPTH) * 4;
   #if DEBUG > 0
     Serial.begin(9600);
     delay(1000);
     Serial.println("Meizzel Machine - Start");
     Serial.printf("Initial Time: %d\n",release_time_ms);
-    Serial.printf("Initial amount: %d\n",ducking_amount);    
+    Serial.printf("Initial amount: %d\n",ducking_amount);
+    analogWrite(PIN_LED_ENABLE, 255);
+    leds[LED_ENABLE].state = LED_STATE_ON;
+    analogWrite(PIN_LED_TAPTEMPO, 255); 
+    leds[LED_TAPTEMPO].state = LED_STATE_ON;  
   #endif
 
 }
