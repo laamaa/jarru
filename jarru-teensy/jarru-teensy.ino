@@ -9,14 +9,20 @@
 #define PIN_POT_DEPTH 21
 #define PIN_POT_TIME A6
 
-/* Whether to enable debugging calls */
-#define DEBUG 1
+/* Whether to enable debugging serial console messages. 1=less stuff, 2=everything */
+#define DEBUG 2
 
 /* Maximum allowed time between tap tempo presses */
-#define MAX_TAP_TIME 5000
+#define MAX_TAP_TIME 3000
 
 /* Time to press the tap tempo switch in order to turn the feature on/off */
 #define TAP_SW_ON_OFF_TIME 3000
+
+/* Switch debouncing time in ms */
+#define DEBOUNCE_TIME 200
+
+/* MIDI channel setting */
+#define MIDI_CHANNEL 16
 
 /* CV envelope states */
 enum env_state {
@@ -51,6 +57,7 @@ unsigned long trigger_start_time_ms = 0;
 uint16_t hold_time_ms = 200;
 uint16_t release_time_ms = 0;
 uint16_t ducking_amount = 0;
+unsigned long tap_timer = 0;
 uint16_t tap_interval = 0;
 bool enabled = true;
 bool sw_enable_down = false;
@@ -93,6 +100,12 @@ void update_cv()
   }
 }
 
+inline void trigger_envelope()
+{
+  trigger_start_time_ms = 0;
+  state = ENV_START;
+}
+
 /* Read & process hardware controls */
 void read_controls()
 {
@@ -100,13 +113,17 @@ void read_controls()
   static unsigned long tap_start_time = 0;
   static unsigned long tap_press_time = 0;
   static unsigned long tmr_sw_enable_debounce = 0;
+  static unsigned long tmr_sw_taptempo_debounce = 0;
+  static uint16_t val_time;
+  static uint16_t val_depth;
   
   /* Enable FX switch */
   if (digitalRead(PIN_SW_ENABLE)) {
     if (sw_enable_down == false) {
-      if (tmr_sw_enable_debounce == 0 || millis() - tmr_sw_enable_debounce > 200) {
+      /* Debounce timer to prevent duplicate events from happening when the switch is being pressed */
+      if (tmr_sw_enable_debounce == 0 || millis() - tmr_sw_enable_debounce > DEBOUNCE_TIME) {
         #if DEBUG > 0
-          Serial.println("Enable down");
+          Serial.println("SW Enable down");
         #endif
         sw_enable_down = true;
         enabled = !enabled;
@@ -120,7 +137,7 @@ void read_controls()
     } 
   } else {
     sw_enable_down = false;
-    tmr_sw_enable_debounce = 0;
+    if (tmr_sw_enable_debounce != 0 || millis() - tmr_sw_enable_debounce > DEBOUNCE_TIME) tmr_sw_enable_debounce = 0;
   }
 
   /*  Tap Tempo Switch
@@ -128,23 +145,27 @@ void read_controls()
    *  otherwise just calculate the time */
   if (digitalRead(PIN_SW_TAPTEMPO)) {
     if (sw_taptempo_down == false) {
-      #if DEBUG > 0
-        Serial.println("Tap tempo down");
-      #endif
-      tap_press_time = millis();
-      sw_taptempo_down = true;
-      if (tap_start_time == 0 || ((millis() - tap_start_time) > MAX_TAP_TIME)) {
-        tap_start_time = millis();
-        trigger_start_time_ms = 0;
-        state = ENV_START;
-      } else {
-        if (millis() - tap_start_time > 200) {
-          tap_interval = millis() - tap_start_time;
-          tap_start_time = 0;
-          #if DEBUG > 0
-            Serial.printf("Interval: %d\n", tap_interval);
-          #endif
+      /* Debounce timer to prevent duplicate events from happening when the switch is being pressed */
+      if (tmr_sw_taptempo_debounce == 0 || millis() - tmr_sw_taptempo_debounce > DEBOUNCE_TIME) {
+        #if DEBUG > 0
+          Serial.println("SW Tap tempo down");
+        #endif
+        tmr_sw_taptempo_debounce = millis();
+        tap_press_time = millis();
+        sw_taptempo_down = true;
+        if (tap_start_time == 0 || ((millis() - tap_start_time) > MAX_TAP_TIME)) {
+          tap_start_time = millis();
+        } else {
+          if (millis() - tap_start_time > 200) {
+            tap_interval = millis() - tap_start_time;
+            tap_start_time = 0;
+            #if DEBUG > 0
+              Serial.printf("Interval: %d\n", tap_interval);
+            #endif
+          }
         }
+        /* Trigger the envelope */
+        trigger_envelope();
       }
     } else {
       /* If tap tempo button was already pressed down, check if we should disable the feature */
@@ -152,17 +173,22 @@ void read_controls()
         tap_interval = 0;
         tap_start_time = 0;
         leds[LED_TAPTEMPO].state = LED_STATE_OFF;
+        #if DEBUG > 0
+          Serial.println("Tap tempo off");
+        #endif
       }
     }
   } else {
     sw_taptempo_down = false;
+    if (tmr_sw_taptempo_debounce != 0 && millis() - tmr_sw_taptempo_debounce > DEBOUNCE_TIME) tmr_sw_taptempo_debounce = 0;
   }
 
   /* Depth potentiometer */
-  val = analogRead(PIN_POT_DEPTH) * 4;
-  if (val >! ducking_amount + 80 || val <! ducking_amount - 80) {
-    //filter out possible random glitching values
-    ducking_amount = val;
+  val = analogRead(PIN_POT_DEPTH);
+  /* The pots are quite noisy when the different currents' grounds are shorted, let's do some filtering... */
+  if (val != val_depth && (val > val_depth + 20 || val < val_depth - 20) && (val < val_depth + 30 || val > val_depth -30)) {
+    val_depth = val;
+    ducking_amount = val*4;
     #if DEBUG > 0
     Serial.printf("Depth: %d\n",val);
     #endif
@@ -171,7 +197,9 @@ void read_controls()
   
   /* Time potentiometer */
   val = analogRead(PIN_POT_TIME);
-  if (val >! release_time_ms + 20 || val <! release_time_ms - 20) {
+  /* The pots are quite noisy when the different currents' grounds are shorted, let's do some filtering... */
+  if (val != val_time && (val > val_time + 20 || val < val_time - 20) && (val < val_time + 30 || val > val_time -30)) {
+    val_time = val;
     hold_time_ms = val;
     release_time_ms = val * 2;
     #if DEBUG > 0
@@ -186,8 +214,6 @@ void process_tap_tempo()
 {
   if (tap_interval == 0) return;
 
-  static unsigned long tap_timer = 0;
-
   if (tap_timer == 0)
     tap_timer = millis();
   else if (millis() - tap_timer > tap_interval) {
@@ -195,10 +221,9 @@ void process_tap_tempo()
     leds[LED_TAPTEMPO].state = LED_STATE_START;
     if (enabled == true) {
       #if DEBUG > 0
-        Serial.println("Tap tempo trigger");
+        Serial.println("Tap");
       #endif
-      trigger_start_time_ms = 0;
-      state = ENV_START;
+      trigger_envelope();
     }
   }  
 }
@@ -226,6 +251,7 @@ void setup()
 {
   analogWriteResolution(12);
   usbMIDI.setHandleNoteOn(OnNoteOn);
+  usbMIDI.setHandleRealTimeSystem(RealTimeSystem);
   analogWrite(PIN_CV_OUT,4095);
   pinMode(PIN_LED_ENABLE,OUTPUT);
   pinMode(PIN_LED_TAPTEMPO,OUTPUT);
@@ -233,15 +259,13 @@ void setup()
   pinMode(PIN_SW_TAPTEMPO,INPUT);
   pinMode(PIN_POT_DEPTH,INPUT);
   pinMode(PIN_POT_TIME,INPUT);
-  hold_time_ms = analogRead(PIN_POT_TIME);
-  release_time_ms = hold_time_ms * 2;
-  ducking_amount = analogRead(PIN_POT_DEPTH) * 4;
+  read_controls();
   #if DEBUG > 0
     Serial.begin(9600);
     delay(1000);
     Serial.println("Meizzel Machine - Start");
-    Serial.printf("Initial Time: %d\n",release_time_ms);
-    Serial.printf("Initial amount: %d\n",ducking_amount);
+    Serial.printf("Initial time: %d\n",release_time_ms);
+    Serial.printf("Initial depth: %d\n",ducking_amount);
     analogWrite(PIN_LED_ENABLE, 255);
     leds[LED_ENABLE].state = LED_STATE_ON;
     analogWrite(PIN_LED_TAPTEMPO, 255); 
@@ -264,7 +288,64 @@ void loop()
 
 void OnNoteOn(byte channel, byte pitch, byte velocity)
 {
+  if (channel != MIDI_CHANNEL) return;
   /* Trigger the envelope on any note on message */
-  trigger_start_time_ms = 0;
-  state = ENV_START;
+  trigger_envelope();
+}
+
+void RealTimeSystem(byte realtimebyte)
+{
+  static uint8_t clock_count = 0;
+  static uint8_t deviating_intervals_count = 0;
+  static uint16_t tmr_midi_clock = 0;
+  static bool buffer_is_ready = false;
+  static uint16_t clock_buffer[96] = {0};
+  static uint16_t avg_interval = 0;
+  
+  /* Midi clock pulse, 24ppq */
+  if (realtimebyte == 248) {
+    /* Initialize clock timer on first pulse and do nothing else*/
+    if (clock_count == 0) {
+      tmr_midi_clock = (uint16_t)micros();
+      tap_timer = 0;
+      clock_count++;
+      return;
+    }
+    if (buffer_is_ready) {
+      /* If our clock buffer is ready, we keep things steady and just check for deviating intervals (tempo changes) and then reset the buffer */
+    } else {
+      uint32_t interval_sum = 0;
+      /* If the clock buffer is not ready yet, store the interval between the current and last pulse and calculate the average interval from what we have */
+      clock_buffer[clock_count-1] = (uint16_t)micros() - tmr_midi_clock;
+      if (clock_count == 96) buffer_is_ready = true; // We have our buffer full, burp.
+      for (uint8_t i=0; i < clock_count; i++) {
+        interval_sum += clock_buffer[i];
+      }
+      avg_interval = interval_sum / clock_count;
+      #if DEBUG > 1
+        double bpm = 60000/(avg_interval/1000*24);
+        Serial.printf("RT count: %d avg: %d bpm: %02d",clock_count,avg_interval);
+        Serial.println(bpm);
+      #endif
+    }
+    
+    tap_interval = avg_interval / 1000 * 24;
+
+    if (clock_count < 96) 
+      clock_count++;
+    else
+      clock_count = 0;
+    
+    /*
+      if (clock_count == 0) tmr_midi_clock_start = micros();
+      clock_count++;
+      if (clock_count == 24) {
+        uint16_t interval_ms = (micros() - tmr_midi_clock_start)/1000;
+        if (tap_interval != interval_ms) {
+          tap_timer = 0;
+          tap_interval = interval_ms;
+        }
+      }
+    */
+  }
 }
