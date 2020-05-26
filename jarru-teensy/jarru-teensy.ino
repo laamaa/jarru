@@ -24,6 +24,9 @@
 /* MIDI channel setting */
 #define MIDI_CHANNEL 16
 
+/* MIDI clock pulses per quarter note */
+#define MIDI_CLOCK_PPQ 24
+
 /* CV envelope states */
 enum env_state {
   ENV_START,
@@ -302,50 +305,38 @@ void RealTimeSystem(byte realtimebyte)
   static uint16_t clock_buffer[96] = {0};
   static uint16_t avg_interval = 0;
   
-  /* Midi clock pulse, 24ppq */
-  if (realtimebyte == 248) {
-    /* Initialize clock timer on first pulse and do nothing else*/
-    if (clock_count == 0) {
-      tmr_midi_clock = (uint16_t)micros();
-      tap_timer = 0;
-      clock_count++;
-      return;
-    }
-    if (buffer_is_ready) {
-      /* If our clock buffer is ready, we keep things steady and just check for deviating intervals (tempo changes) and then reset the buffer */
-    } else {
-      uint32_t interval_sum = 0;
-      /* If the clock buffer is not ready yet, store the interval between the current and last pulse and calculate the average interval from what we have */
-      clock_buffer[clock_count-1] = (uint16_t)micros() - tmr_midi_clock;
-      if (clock_count == 96) buffer_is_ready = true; // We have our buffer full, burp.
-      for (uint8_t i=0; i < clock_count; i++) {
-        interval_sum += clock_buffer[i];
+  switch (realtimebyte) {
+    /* Midi clock pulse (byte 0xF8 or decimal 248), resolution defined by MIDI_CLOCK_PPQ */
+    case 0xF8:
+      /* Initialize clock timer on first pulse and do nothing else*/
+      if (clock_count == 0) {
+        tmr_midi_clock = (uint16_t)micros();
+        tap_timer = 0;
+        clock_count++;
+        return;
       }
-      avg_interval = interval_sum / clock_count;
-      #if DEBUG > 1
-        double bpm = 60000/(avg_interval/1000*24);
-        Serial.printf("RT count: %d avg: %d bpm: %02d",clock_count,avg_interval);
-        Serial.println(bpm);
-      #endif
-    }
-    
-    tap_interval = avg_interval / 1000 * 24;
-
-    if (clock_count < 96) 
-      clock_count++;
-    else
-      clock_count = 0;
-    
-    /*
-      if (clock_count == 0) tmr_midi_clock_start = micros();
-      clock_count++;
-      if (clock_count == 24) {
-        uint16_t interval_ms = (micros() - tmr_midi_clock_start)/1000;
-        if (tap_interval != interval_ms) {
-          tap_timer = 0;
-          tap_interval = interval_ms;
+      if (buffer_is_ready) {
+        /* If our clock buffer is ready, we keep things steady and just check for deviating intervals (tempo changes) and then reset the buffer */
+      } else {
+        uint32_t interval_sum = 0;
+        /* If the clock buffer is not ready yet, store the interval between the current and last pulse and calculate the average interval from what we have */
+        clock_buffer[clock_count-1] = (uint16_t)micros() - tmr_midi_clock;
+        if (clock_count == 96) buffer_is_ready = true; // We have our buffer full, burp.
+        for (uint8_t i=0; i < clock_count; i++) {
+          interval_sum += clock_buffer[i];
         }
+        avg_interval = interval_sum / clock_count;
+        #if DEBUG > 1
+          Serial.printf("RT count: %d avg: %d\n",clock_count,avg_interval);
+          Serial.println(60000/((avg_interval/1000) * MIDI_CLOCK_PPQ));
+        #endif
+        tap_interval = (avg_interval/1000) * MIDI_CLOCK_PPQ;
       }
-    */
+  
+      if (clock_count < 96) 
+        clock_count++;
+      else
+        clock_count = 0;
+        break;
   }
 }
