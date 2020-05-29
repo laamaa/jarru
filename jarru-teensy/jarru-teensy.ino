@@ -10,7 +10,7 @@
 #define PIN_POT_TIME A6
 
 /* Whether to enable debugging serial console messages. 1=less stuff, 2=everything */
-#define DEBUG 2
+#define DEBUG 0
 
 /* Maximum allowed time between tap tempo presses */
 #define MAX_TAP_TIME 3000
@@ -24,8 +24,11 @@
 /* MIDI channel setting */
 #define MIDI_CHANNEL 16
 
-/* MIDI clock pulses per quarter note */
-#define MIDI_CLOCK_PPQ 24
+/* MIDI clock buffer reset threshold (in microsec, 1000 = 1ms) */
+#define MIDI_CLOCK_DEVIATION_THRESHOLD 1000
+
+/* MIDI clock buffer size */
+#define MIDI_CLOCK_BUFFER_SIZE 96
 
 /* CV envelope states */
 enum env_state {
@@ -57,14 +60,16 @@ typedef struct led {
 led leds[2];
 enum env_state state = ENV_DONE;
 unsigned long trigger_start_time_ms = 0;
-uint16_t hold_time_ms = 200;
+uint16_t hold_time_ms = 10;
 uint16_t release_time_ms = 0;
 uint16_t ducking_amount = 0;
-unsigned long tap_timer = 0;
-uint16_t tap_interval = 0;
-bool enabled = true;
-bool sw_enable_down = false;
-bool sw_taptempo_down = false;
+uint16_t val_time = 0;
+unsigned long tap_timer = 0; //timer for tap function
+unsigned long tap_interval = 0; //pumper interval in micros
+bool enabled = true; //is the effect enabled
+bool sw_enable_down = false; //is enable switch pressed
+bool sw_taptempo_down = false; //is tap tempo switch pressed
+bool midi_sync = false; //do we have midi clock sync
 
 /* CV envelope processing */
 void update_cv()
@@ -76,7 +81,7 @@ void update_cv()
   /* Trigger new envelope */
   if (state == ENV_START && trigger_start_time_ms == 0)
   {
-    analogWrite(PIN_CV_OUT, int(4095.0 - ducking_amount));
+    if (enabled) analogWrite(PIN_CV_OUT, int(4095.0 - ducking_amount));
     trigger_start_time_ms = millis();
   }
 
@@ -92,13 +97,13 @@ void update_cv()
     value = 4095.0 - ducking_amount + ((current_time_ms - trigger_start_time_ms - hold_time_ms) * step_ms);
     if (value > 4095)
       value = 4095;
-    analogWrite(PIN_CV_OUT, value);
+    if (enabled) analogWrite(PIN_CV_OUT, value);
   }
 
   /* if we're done, let's just chill */
   if (state == ENV_RELEASE && (current_time_ms - trigger_start_time_ms - hold_time_ms) > release_time_ms)
   {
-    analogWrite(PIN_CV_OUT, 4095);
+    if (enabled) analogWrite(PIN_CV_OUT, 4095);
     state = ENV_DONE;
   }
 }
@@ -109,6 +114,24 @@ inline void trigger_envelope()
   state = ENV_START;
 }
 
+/* adjust time parameter */
+void set_envelope_timing(uint16_t val)
+{
+  if (val == 0) val = val_time;
+    if (tap_interval > 0) {
+      /* If there is midi sync or tap tempo defined, we'll use that as the max range for time setting */
+      uint16_t range = tap_interval/1000; //tap_interval is in microsec
+      hold_time_ms = 10+((double)range/1023)*(val/2);
+      release_time_ms = (double)(val+1)/1024*(range-(hold_time_ms/2));
+      if (hold_time_ms + release_time_ms > range) release_time_ms = range-hold_time_ms;
+      #if DEBUG > 1
+      Serial.printf("Time val: %d, range: %d, release: %d, hold: %d\n",val,range,release_time_ms,hold_time_ms);
+      #endif
+    } else {
+      release_time_ms  = val;
+    }
+}
+
 /* Read & process hardware controls */
 void read_controls()
 {
@@ -117,7 +140,6 @@ void read_controls()
   static unsigned long tap_press_time = 0;
   static unsigned long tmr_sw_enable_debounce = 0;
   static unsigned long tmr_sw_taptempo_debounce = 0;
-  static uint16_t val_time;
   static uint16_t val_depth;
   
   /* Enable FX switch */
@@ -160,14 +182,16 @@ void read_controls()
           tap_start_time = millis();
         } else {
           if (millis() - tap_start_time > 200) {
-            tap_interval = millis() - tap_start_time;
+            tap_interval = (millis() - tap_start_time)*1000;
             tap_start_time = 0;
             #if DEBUG > 0
-              Serial.printf("Interval: %d\n", tap_interval);
+              Serial.printf("Interval: %d bpm: %d\n", tap_interval/1000, 60000000/tap_interval);
             #endif
+            set_envelope_timing(val_time);
           }
         }
         /* Trigger the envelope */
+        tap_timer = 0;
         trigger_envelope();
       }
     } else {
@@ -203,11 +227,7 @@ void read_controls()
   /* The pots are quite noisy when the different currents' grounds are shorted, let's do some filtering... */
   if (val != val_time && (val > val_time + 20 || val < val_time - 20) && (val < val_time + 30 || val > val_time -30)) {
     val_time = val;
-    hold_time_ms = val;
-    release_time_ms = val * 2;
-    #if DEBUG > 0
-    Serial.printf("Time: %d\n",val);
-    #endif
+    set_envelope_timing(val);
     /* TODO: Adjust hold time also in accordion with release time */
   }
 }
@@ -218,12 +238,12 @@ void process_tap_tempo()
   if (tap_interval == 0) return;
 
   if (tap_timer == 0)
-    tap_timer = millis();
-  else if (millis() - tap_timer > tap_interval) {
+    tap_timer = micros();
+  else if (micros() - tap_timer > tap_interval) {
     tap_timer = 0;
     leds[LED_TAPTEMPO].state = LED_STATE_START;
     if (enabled == true) {
-      #if DEBUG > 0
+      #if DEBUG > 1
         Serial.println("Tap");
       #endif
       trigger_envelope();
@@ -263,27 +283,24 @@ void setup()
   pinMode(PIN_POT_DEPTH,INPUT);
   pinMode(PIN_POT_TIME,INPUT);
   read_controls();
+  analogWrite(PIN_LED_ENABLE, 255);
+  leds[LED_ENABLE].state = LED_STATE_ON;  
   #if DEBUG > 0
     Serial.begin(9600);
     delay(1000);
     Serial.println("Meizzel Machine - Start");
     Serial.printf("Initial time: %d\n",release_time_ms);
     Serial.printf("Initial depth: %d\n",ducking_amount);
-    analogWrite(PIN_LED_ENABLE, 255);
-    leds[LED_ENABLE].state = LED_STATE_ON;
     analogWrite(PIN_LED_TAPTEMPO, 255); 
     leds[LED_TAPTEMPO].state = LED_STATE_ON;  
   #endif
-
 }
 
 
 void loop()
 {
-  if (enabled == true) {
-    usbMIDI.read();
-    update_cv();
-  }
+  usbMIDI.read();
+  update_cv();
   process_tap_tempo();
   read_controls();
   process_leds();
@@ -296,47 +313,97 @@ void OnNoteOn(byte channel, byte pitch, byte velocity)
   trigger_envelope();
 }
 
-void RealTimeSystem(byte realtimebyte)
+/*  MIDI clock messages are handled here
+ *  Clock messages are buffered to an array of 96 intervals and an average from those is used to calculate the tempo
+ *  If an incoming clock message's interval from the last one is lower than higher than our threshold (default 1ms),
+ *  the buffer is reset and the average will be calculated from zero again. This way we'll catch tempo changes better
+ *  than by just letting the average slide slowly to a new value.
+ */
+void RealTimeSystem(uint8_t realtimebyte, uint32_t timestamp)
 {
   static uint8_t clock_count = 0;
-  static uint8_t deviating_intervals_count = 0;
-  static uint16_t tmr_midi_clock = 0;
-  static bool buffer_is_ready = false;
-  static uint16_t clock_buffer[96] = {0};
+  static unsigned long tmr_midi_clock = 0;
   static uint16_t avg_interval = 0;
+  static bool buffer_is_ready = false;
+  static uint16_t clock_buffer[MIDI_CLOCK_BUFFER_SIZE] = {0};
+  static uint8_t deviating_intervals_count = 0;
   
   switch (realtimebyte) {
-    /* Midi clock pulse (byte 0xF8 or decimal 248), resolution defined by MIDI_CLOCK_PPQ */
+    /* MIDI clock pulse */
     case 0xF8:
-      /* Initialize clock timer on first pulse and do nothing else*/
-      if (clock_count == 0) {
-        tmr_midi_clock = (uint16_t)micros();
-        tap_timer = 0;
-        clock_count++;
-        return;
-      }
+    {
+      uint16_t clockinterval = timestamp - tmr_midi_clock;
       if (buffer_is_ready) {
-        /* If our clock buffer is ready, we keep things steady and just check for deviating intervals (tempo changes) and then reset the buffer */
+        /* If our clock buffer is ready, we keep things steady and just check for deviating intervals
+           (defined by MIDI_CLOCK_DEVIATION_THRESHOLD, default 1ms) from usual and then reset the buffer so we catch tempo changes better */        
+        if (clockinterval > (uint16_t)(avg_interval + MIDI_CLOCK_DEVIATION_THRESHOLD) || clockinterval < (uint16_t)(avg_interval - MIDI_CLOCK_DEVIATION_THRESHOLD)) {
+          deviating_intervals_count++;
+          #if DEBUG > 1
+            Serial.printf("Deviating interval! count:%d interval: %d avg: %d\n",deviating_intervals_count,clockinterval,avg_interval);
+          #endif
+          tmr_midi_clock = timestamp;
+          if (deviating_intervals_count > 2) {
+            /* Flush MIDI clock buffer, calculated averages and timer */
+            memset(clock_buffer,0,sizeof clock_buffer);
+            clock_count = 0;
+            avg_interval = 0;
+            buffer_is_ready = false;
+            deviating_intervals_count = 0;
+            tmr_midi_clock = 0;
+            midi_sync = false;
+            #if DEBUG > 1
+              Serial.println("MIDI clock buffer flushed");
+            #endif
+          }
+          return;
+        } else
+          deviating_intervals_count = 0;
       } else {
-        uint32_t interval_sum = 0;
-        /* If the clock buffer is not ready yet, store the interval between the current and last pulse and calculate the average interval from what we have */
-        clock_buffer[clock_count-1] = (uint16_t)micros() - tmr_midi_clock;
-        if (clock_count == 96) buffer_is_ready = true; // We have our buffer full, burp.
-        for (uint8_t i=0; i < clock_count; i++) {
-          interval_sum += clock_buffer[i];
+        /* Initialize clock timer on first pulse and do nothing else*/
+        if (clock_count == 0) {
+          tmr_midi_clock = timestamp;
+          clock_count++;
+          return;
         }
-        avg_interval = interval_sum / clock_count;
-        #if DEBUG > 1
-          Serial.printf("RT count: %d avg: %d\n",clock_count,avg_interval);
-          Serial.println(60000/((avg_interval/1000) * MIDI_CLOCK_PPQ));
-        #endif
-        tap_interval = (avg_interval/1000) * MIDI_CLOCK_PPQ;
       }
-  
-      if (clock_count < 96) 
+
+      uint32_t interval_sum = 0;
+
+      clock_buffer[clock_count-1] = clockinterval;
+      for (uint8_t i=0; i < MIDI_CLOCK_BUFFER_SIZE; i++)
+        interval_sum += clock_buffer[i];
+      if (buffer_is_ready) avg_interval = interval_sum / MIDI_CLOCK_BUFFER_SIZE;
+      else avg_interval = interval_sum / clock_count;
+      #if DEBUG > 1
+        double bpm = 60000000/(avg_interval * 24);
+        Serial.printf("Clock count: %d avg: %ld bpm: ",clock_count,avg_interval);
+        Serial.println(bpm);
+      #endif
+      tap_interval = avg_interval * 24;
+      set_envelope_timing(0);
+      tmr_midi_clock = timestamp;
+
+      if (clock_count < MIDI_CLOCK_BUFFER_SIZE)
         clock_count++;
-      else
-        clock_count = 0;
-        break;
+      else {
+        clock_count = 1;
+        if (!buffer_is_ready) {
+          buffer_is_ready = true; // We have our buffer full, burp.
+          if (!midi_sync) midi_sync = true;
+          #if DEBUG > 1
+            Serial.println("Midi clock buffer full");
+          #endif        
+        }
+      }
+      break;
+    }
+    /* MIDI Start / continue message */
+    case 0xFA:
+    case 0xFB:
+      /* Reset tap timer and trigger envelope so we're in da beat */
+      tap_timer = 0;
+      clock_count = 0;
+      trigger_envelope();
+      break;
   }
 }
