@@ -1,4 +1,4 @@
-#include <MIDI.h>
+#include <Bounce.h>
 
 /* Configure output/input pins here */
 #define PIN_CV_OUT A12
@@ -10,7 +10,7 @@
 #define PIN_POT_TIME A6
 
 /* Whether to enable debugging serial console messages. 1=less stuff, 2=everything */
-#define DEBUG 0
+#define DEBUG 2
 
 /* Maximum allowed time between tap tempo presses */
 #define MAX_TAP_TIME 3000
@@ -19,16 +19,10 @@
 #define TAP_SW_ON_OFF_TIME 3000
 
 /* Switch debouncing time in ms */
-#define DEBOUNCE_TIME 200
+#define DEBOUNCE_TIME 100
 
 /* MIDI channel setting */
 #define MIDI_CHANNEL 16
-
-/* MIDI clock buffer reset threshold (in microsec, 1000 = 1ms) */
-#define MIDI_CLOCK_DEVIATION_THRESHOLD 1000
-
-/* MIDI clock buffer size */
-#define MIDI_CLOCK_BUFFER_SIZE 96
 
 /* CV envelope states */
 enum env_state {
@@ -59,7 +53,6 @@ typedef struct led {
 /* Global variables */
 led leds[2];
 enum env_state state = ENV_DONE;
-unsigned long trigger_start_time_ms = 0;
 uint16_t hold_time_ms = 10;
 uint16_t release_time_ms = 0;
 uint16_t ducking_amount = 0;
@@ -67,10 +60,11 @@ uint16_t val_time = 0;
 unsigned long tap_timer = 0; //timer for tap function
 unsigned long tap_interval = 500000; //pumper interval in micros
 bool enabled = true; //is the effect enabled
-bool sw_enable_down = false; //is enable switch pressed
-bool sw_taptempo_down = false; //is tap tempo switch pressed
 bool midi_sync = false; //do we have midi clock sync
+uint8_t clock_counter = 0; //midi clock counter
 uint32_t last_midi_clock_message_time = 0;
+Bounce sw_enable(PIN_SW_ENABLE,DEBOUNCE_TIME);
+Bounce sw_taptempo(PIN_SW_TAPTEMPO,DEBOUNCE_TIME);
 
 /* CV envelope processing */
 void update_cv()
@@ -78,10 +72,10 @@ void update_cv()
   if (state == ENV_DONE) return;
   
   unsigned long current_time_ms = millis();
+  static unsigned long trigger_start_time_ms = 0;
 
   /* Trigger new envelope */
-  if (state == ENV_START && trigger_start_time_ms == 0)
-  {
+  if (state == ENV_START && trigger_start_time_ms == 0) {
     if (enabled) analogWrite(PIN_CV_OUT, int(4095.0 - ducking_amount));
     trigger_start_time_ms = millis();
   }
@@ -91,8 +85,7 @@ void update_cv()
     state = ENV_RELEASE;
 
   /* release */
-  if (state == ENV_RELEASE && trigger_start_time_ms != 0)
-  {
+  if (state == ENV_RELEASE && trigger_start_time_ms != 0) {
     double step_ms = ducking_amount / release_time_ms;
     uint16_t value;
     value = 4095.0 - ducking_amount + ((current_time_ms - trigger_start_time_ms - hold_time_ms) * step_ms);
@@ -102,16 +95,15 @@ void update_cv()
   }
 
   /* if we're done, let's just chill */
-  if (state == ENV_RELEASE && (current_time_ms - trigger_start_time_ms - hold_time_ms) > release_time_ms)
-  {
+  if (state == ENV_RELEASE && (current_time_ms - trigger_start_time_ms - hold_time_ms) > release_time_ms) {
     if (enabled) analogWrite(PIN_CV_OUT, 4095);
     state = ENV_DONE;
+    trigger_start_time_ms = 0;
   }
 }
 
 inline void trigger_envelope()
 {
-  trigger_start_time_ms = 0;
   state = ENV_START;
 }
 
@@ -138,47 +130,27 @@ void read_controls()
 {
   uint16_t val;
   static unsigned long tap_start_time = 0;
-  static unsigned long tap_press_time = 0;
-  static unsigned long tmr_sw_enable_debounce = 0;
-  static unsigned long tmr_sw_taptempo_debounce = 0;
   static uint16_t val_depth;
   
   /* Enable FX switch */
-  if (digitalRead(PIN_SW_ENABLE)) {
-    if (sw_enable_down == false) {
-      /* Debounce timer to prevent duplicate events from happening when the switch is being pressed */
-      if (tmr_sw_enable_debounce == 0 || millis() - tmr_sw_enable_debounce > DEBOUNCE_TIME) {
-        #if DEBUG > 0
-          Serial.println("SW Enable down");
-        #endif
-        sw_enable_down = true;
-        enabled = !enabled;
-        if (!enabled) {
-          analogWrite(PIN_CV_OUT,4095);
-          analogWrite(PIN_LED_ENABLE,0);
-        } else
-          analogWrite(PIN_LED_ENABLE,255);
-        tmr_sw_enable_debounce = millis();
-      }
-    } 
-  } else {
-    sw_enable_down = false;
-    if (tmr_sw_enable_debounce != 0 || millis() - tmr_sw_enable_debounce > DEBOUNCE_TIME) tmr_sw_enable_debounce = 0;
+  if (sw_enable.update() && sw_enable.fallingEdge()) {
+    #if DEBUG > 0
+      Serial.println("SW Enable down");
+    #endif
+    enabled = !enabled;
+    if (!enabled) {
+      analogWrite(PIN_CV_OUT,4095); //full volume when fx not enabled
+      analogWrite(PIN_LED_ENABLE,0);
+    } else
+      analogWrite(PIN_LED_ENABLE,255);
   }
 
-  /*  Tap Tempo Switch
-   *  If the switch is pressed continously for over 3s, turn off tap tempo
-   *  otherwise just calculate the time */
-  if (digitalRead(PIN_SW_TAPTEMPO)) {
-    if (sw_taptempo_down == false) {
-      /* Debounce timer to prevent duplicate events from happening when the switch is being pressed */
-      if (tmr_sw_taptempo_debounce == 0 || millis() - tmr_sw_taptempo_debounce > DEBOUNCE_TIME) {
+  /*  Tap Tempo Switch */
+  if (sw_taptempo.update()) {
+    if (sw_taptempo.fallingEdge()) {
         #if DEBUG > 0
           Serial.println("SW Tap tempo down");
         #endif
-        tmr_sw_taptempo_debounce = millis();
-        tap_press_time = millis();
-        sw_taptempo_down = true;
         if (tap_start_time == 0 || ((millis() - tap_start_time) > MAX_TAP_TIME)) {
           tap_start_time = millis();
         } else {
@@ -194,21 +166,7 @@ void read_controls()
         /* Trigger the envelope */
         tap_timer = 0;
         trigger_envelope();
-      }
-    } else {
-      /* If tap tempo button was already pressed down, check if we should disable the feature */
-      if (millis() - tap_press_time > TAP_SW_ON_OFF_TIME) {
-        tap_interval = 0;
-        tap_start_time = 0;
-        leds[LED_TAPTEMPO].state = LED_STATE_OFF;
-        #if DEBUG > 0
-          Serial.println("Tap tempo off");
-        #endif
-      }
     }
-  } else {
-    sw_taptempo_down = false;
-    if (tmr_sw_taptempo_debounce != 0 && millis() - tmr_sw_taptempo_debounce > DEBOUNCE_TIME) tmr_sw_taptempo_debounce = 0;
   }
 
   /* Depth potentiometer */
@@ -229,7 +187,6 @@ void read_controls()
   if (val != val_time && (val > val_time + 20 || val < val_time - 20) && (val < val_time + 30 || val > val_time -30)) {
     val_time = val;
     set_envelope_timing(val);
-    /* TODO: Adjust hold time also in accordion with release time */
   }
 }
 
@@ -272,8 +229,15 @@ void process_leds()
 }
 
 void check_midi_sync() {
-  if (midi_sync == true && micros() - last_midi_clock_message_time > 5000) {
-    midi_sync = false;
+  if (midi_sync == true) {
+    uint8_t interval = (micros() - last_midi_clock_message_time) / 1000000;
+    if (interval > 0) {
+      midi_sync = false;
+      clock_counter = 0;
+      #if DEBUG > 0
+      Serial.println("Midi sync lost");
+      #endif
+    }
   }
 }
 
@@ -317,18 +281,13 @@ void OnNoteOn(byte channel, byte pitch, byte velocity)
 {
   if (channel != MIDI_CHANNEL) return;
   /* Trigger the envelope on any note on message */
+  /* TODO: set ducking amount with velocity */
   trigger_envelope();
 }
 
-/*  MIDI clock messages are handled here
- *  Clock messages are buffered to an array of 96 intervals and an average from those is used to calculate the tempo
- *  If an incoming clock message's interval from the last one is lower than higher than our threshold (default 1ms),
- *  the buffer is reset and the average will be calculated from zero again. This way we'll catch tempo changes better
- *  than by just letting the average slide slowly to a new value.
- */
+/* MIDI clock messages are handled here */
 void RealTimeSystem(uint8_t realtimebyte, uint32_t timestamp)
 {
-  static uint8_t clock_counter = 0;
   static uint32_t first_timestamp = 0;
   
   switch (realtimebyte) {
@@ -349,7 +308,9 @@ void RealTimeSystem(uint8_t realtimebyte, uint32_t timestamp)
         case 24:
           tap_interval = timestamp - first_timestamp;
           #if DEBUG > 1
-            Serial.printf("Midi BPM: %.02f",60000000/tap_interval);
+            double bpm = 60000000/(double)tap_interval;
+            Serial.print("Midi BPM: ");
+            Serial.println(bpm);
           #endif
           first_timestamp = timestamp;
           clock_counter = 0;
