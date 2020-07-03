@@ -10,10 +10,10 @@
 #define PIN_POT_TIME A6
 
 /* Whether to enable debugging serial console messages. 1=less stuff, 2=everything */
-#define DEBUG 2
+#define DEBUG 0
 
 /* Maximum allowed time between tap tempo presses */
-#define MAX_TAP_TIME 3000
+#define MAX_TAP_TIME 2000
 
 /* Time to press the tap tempo switch in order to turn the feature on/off */
 #define TAP_SW_ON_OFF_TIME 3000
@@ -59,6 +59,7 @@ uint16_t ducking_amount = 0;
 uint16_t val_time = 0;
 unsigned long tap_timer = 0; //timer for tap function
 unsigned long tap_interval = 500000; //pumper interval in micros
+unsigned long trigger_start_time_ms = 0; //envelope start time millis
 bool enabled = true; //is the effect enabled
 bool midi_sync = false; //do we have midi clock sync
 uint8_t clock_counter = 0; //midi clock counter
@@ -72,7 +73,6 @@ void update_cv()
   if (state == ENV_DONE) return;
   
   unsigned long current_time_ms = millis();
-  static unsigned long trigger_start_time_ms = 0;
 
   /* Trigger new envelope */
   if (state == ENV_START && trigger_start_time_ms == 0) {
@@ -104,6 +104,9 @@ void update_cv()
 
 inline void trigger_envelope()
 {
+  trigger_start_time_ms = 0;
+  tap_timer = 0;
+  leds[LED_TAPTEMPO].state = LED_STATE_START;
   state = ENV_START;
 }
 
@@ -165,6 +168,7 @@ void read_controls()
         }
         /* Trigger the envelope */
         tap_timer = 0;
+        leds[LED_TAPTEMPO].state = LED_STATE_START;
         trigger_envelope();
     }
   }
@@ -289,24 +293,31 @@ void OnNoteOn(byte channel, byte pitch, byte velocity)
 void RealTimeSystem(uint8_t realtimebyte, uint32_t timestamp)
 {
   static uint32_t first_timestamp = 0;
+  static uint8_t play_flag = 0;
   
   switch (realtimebyte) {
     /* MIDI clock pulse */
     case 0xF8:
     {
+      if (play_flag == 0) return;
       switch (clock_counter) {
         case 0:
           first_timestamp = timestamp;
           break;
+/*          
         case 1:
         case 6:
         case 12:
         case 18:
           if (!midi_sync)
             tap_interval = (timestamp - first_timestamp) * (25-clock_counter);
+            
+            set_envelope_timing(val_time);
           break;
+*/          
         case 24:
           tap_interval = timestamp - first_timestamp;
+          set_envelope_timing(val_time);
           #if DEBUG > 1
             double bpm = 60000000/(double)tap_interval;
             Serial.print("Midi BPM: ");
@@ -324,13 +335,16 @@ void RealTimeSystem(uint8_t realtimebyte, uint32_t timestamp)
     /* MIDI Start / continue message */
     case 0xFA:
     case 0xFB:
-      /* Reset tap timer and trigger envelope so we're in da beat */
-      tap_timer = 0;
+      play_flag = 1;
       clock_counter = 0;
+      /* Reset tap timer and trigger envelope so we're in da beat */
+      set_envelope_timing(val_time);
       trigger_envelope();
+      tap_timer = 0;
       break;
     /* MIDI Stop message */
     case 0xFC:
+      play_flag = 0;
       midi_sync = false;
       clock_counter = 0;
       break;
